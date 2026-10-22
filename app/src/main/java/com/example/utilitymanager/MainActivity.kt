@@ -25,7 +25,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.collectAsState
 import com.example.utilitymanager.data.UtilityDatabase
 import kotlinx.coroutines.launch
+import com.example.utilitymanager.ui.TemplateScreen
 import com.example.utilitymanager.data.ApartmentEntity
+import androidx.compose.ui.draw.clip
 
 private val AppBackground = Color(0xFF070E19)
 private val CardBackground = Color(0xFF111D30)
@@ -59,7 +61,14 @@ data class MeterReading(
 )
 
 private enum class AppScreen {
-    APARTMENTS, ADD_APARTMENT, DETAILS, METERS, CHARGES
+    APARTMENTS,
+    TEMPLATES,
+    HISTORY,
+    STATISTICS,
+    ADD_APARTMENT,
+    DETAILS,
+    METERS,
+    CHARGES
 }
 
 private val meterNames = listOf(
@@ -100,6 +109,9 @@ private fun UtilityApp() {
     val dao = remember {
         UtilityDatabase.getDatabase(context).apartmentDao()
     }
+    val templateDao = remember {
+        UtilityDatabase.getDatabase(context).templateDao()
+    }
     val scope = rememberCoroutineScope()
 
     val apartmentsFromDb by dao.getAll()
@@ -124,6 +136,13 @@ private fun UtilityApp() {
 
     val selectedApartment = apartments.find { it.id == selectedId }
 
+    val mainTab = screen in setOf(
+        AppScreen.APARTMENTS,
+        AppScreen.TEMPLATES,
+        AppScreen.HISTORY,
+        AppScreen.STATISTICS
+    )
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -131,106 +150,158 @@ private fun UtilityApp() {
             .background(AppBackground)
             .padding(horizontal = 18.dp)
     ) {
-        when (screen) {
-            AppScreen.APARTMENTS -> {
-                ApartmentList(
-                    apartments = apartments,
-                    onAdd = {
-                        editingId = -1L
-                        screen = AppScreen.ADD_APARTMENT
-                    },
-                    onOpen = {
-                        selectedId = it.id
-                        screen = AppScreen.DETAILS
-                    }
-                )
-            }
-
-            AppScreen.ADD_APARTMENT -> {
-                ApartmentForm(
-                    initial = apartments.find { it.id == editingId },
-                    onBack = {
-                        screen = if (editingId == -1L) {
-                            AppScreen.APARTMENTS
-                        } else {
-                            AppScreen.DETAILS
-                        }
-                    },
-                    onSave = { number, address, tenant ->
-                        scope.launch {
-                            val savedId = dao.insert(
-                                ApartmentEntity(
-                                    id = if (editingId == -1L) 0L else editingId,
-                                    number = number,
-                                    address = address,
-                                    tenant = tenant
-                                )
-                            )
-                            selectedId = savedId
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            when (screen) {
+                AppScreen.APARTMENTS -> {
+                    ApartmentList(
+                        apartments = apartments,
+                        onAdd = {
                             editingId = -1L
-                            screen = AppScreen.DETAILS
-                        }
-                    }
-                )
-            }
-
-            AppScreen.DETAILS -> {
-                if (selectedApartment == null) {
-                    screen = AppScreen.APARTMENTS
-                } else {
-                    ApartmentDetails(
-                        apartment = selectedApartment,
-                        onBack = { screen = AppScreen.APARTMENTS },
-                        onEdit = {
-                            editingId = selectedApartment.id
                             screen = AppScreen.ADD_APARTMENT
                         },
-                        onDelete = {
-                            scope.launch {
-                                dao.deleteById(selectedId)
-                                readings = readings - selectedId
-                                selectedId = -1L
-                                screen = AppScreen.APARTMENTS
-                            }
-                        },
-                        onMeters = { screen = AppScreen.METERS },
-                        onCharges = { screen = AppScreen.CHARGES }
+                        onOpen = {
+                            selectedId = it.id
+                            screen = AppScreen.DETAILS
+                        }
                     )
                 }
-            }
 
-            AppScreen.METERS -> {
-                if (selectedApartment == null) {
-                    screen = AppScreen.APARTMENTS
-                } else {
-                    MeterScreen(
-                        apartment = selectedApartment,
-                        values = readings[selectedId] ?: List(4) {
-                            MeterReading()
+
+                AppScreen.TEMPLATES -> TemplateScreen(
+                    dao = templateDao
+                )
+
+
+                AppScreen.HISTORY -> {
+                    RootPlaceholderScreen(
+                        title = "История",
+                        description = "История показаний и начислений появится позже.",
+                        icon = "◷"
+                    )
+                }
+
+                AppScreen.STATISTICS -> {
+                    RootPlaceholderScreen(
+                        title = "Статистика",
+                        description = "Отчёты и аналитика появятся позже.",
+                        icon = "▥"
+                    )
+                }
+
+                AppScreen.ADD_APARTMENT -> {
+                    ApartmentForm(
+                        initial = apartments.find {
+                            it.id == editingId
                         },
-                        onBack = { screen = AppScreen.DETAILS },
-                        onChange = { index, reading ->
-                            val current = (
-                                    readings[selectedId] ?: List(4) {
-                                        MeterReading()
-                                    }
-                                    ).toMutableList()
+                        onBack = {
+                            screen = if (editingId == -1L) {
+                                AppScreen.APARTMENTS
+                            } else {
+                                AppScreen.DETAILS
+                            }
+                        },
+                        onSave = { number, address, tenant ->
+                            scope.launch {
+                                val savedId = dao.insert(
+                                    ApartmentEntity(
+                                        id = if (editingId == -1L) {
+                                            0L
+                                        } else {
+                                            editingId
+                                        },
+                                        number = number,
+                                        address = address,
+                                        tenant = tenant
+                                    )
+                                )
 
-                            current[index] = reading
-                            readings = readings + (selectedId to current)
+                                selectedId = savedId
+                                editingId = -1L
+                                screen = AppScreen.DETAILS
+                            }
+                        }
+                    )
+                }
+
+                AppScreen.DETAILS -> {
+                    if (selectedApartment == null) {
+                        screen = AppScreen.APARTMENTS
+                    } else {
+                        ApartmentDetails(
+                            apartment = selectedApartment,
+                            onBack = {
+                                screen = AppScreen.APARTMENTS
+                            },
+                            onEdit = {
+                                editingId = selectedApartment.id
+                                screen = AppScreen.ADD_APARTMENT
+                            },
+                            onDelete = {
+                                scope.launch {
+                                    dao.deleteById(selectedId)
+                                    readings = readings - selectedId
+                                    selectedId = -1L
+                                    screen = AppScreen.APARTMENTS
+                                }
+                            },
+                            onMeters = {
+                                screen = AppScreen.METERS
+                            },
+                            onCharges = {
+                                screen = AppScreen.CHARGES
+                            }
+                        )
+                    }
+                }
+
+                AppScreen.METERS -> {
+                    if (selectedApartment == null) {
+                        screen = AppScreen.APARTMENTS
+                    } else {
+                        MeterScreen(
+                            apartment = selectedApartment,
+                            values = readings[selectedId]
+                                ?: List(4) { MeterReading() },
+                            onBack = {
+                                screen = AppScreen.DETAILS
+                            },
+                            onChange = { index, reading ->
+                                val current = (
+                                        readings[selectedId]
+                                            ?: List(4) { MeterReading() }
+                                        ).toMutableList()
+
+                                current[index] = reading
+                                readings = readings + (
+                                        selectedId to current
+                                        )
+                            }
+                        )
+                    }
+                }
+
+                AppScreen.CHARGES -> {
+                    PlaceholderScreen(
+                        title = "Начисления",
+                        subtitle = "Квартира № ${selectedApartment?.number.orEmpty()}",
+                        description = "Здесь появятся коммунальные услуги, тарифы и итоговая сумма.",
+                        onBack = {
+                            screen = AppScreen.DETAILS
                         }
                     )
                 }
             }
+        }
 
-            AppScreen.CHARGES -> {
-                PlaceholderScreen(
-                    title = "Начисления",
-                    subtitle = "Квартира № ${selectedApartment?.number.orEmpty()}",
-                    description = "Здесь появятся коммунальные услуги, тарифы и итоговая сумма.",
-                    onBack = { screen = AppScreen.DETAILS }
-                )
-            }
+        if (mainTab) {
+            BottomNavigationBar(
+                selectedScreen = screen,
+                onSelect = { screen = it }
+            )
         }
     }
 }
@@ -943,6 +1014,136 @@ private fun SmallActionCard(
             Text(symbol, fontSize = 28.sp, color = AccentBlue)
             Spacer(Modifier.height(7.dp))
             Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+@Composable
+private fun BottomNavigationBar(
+    selectedScreen: AppScreen,
+    onSelect: (AppScreen) -> Unit
+) {
+    val items = listOf(
+        Triple(AppScreen.APARTMENTS, "⌂", "Квартиры"),
+        Triple(AppScreen.TEMPLATES, "▤", "Шаблоны"),
+        Triple(AppScreen.HISTORY, "◷", "История"),
+        Triple(AppScreen.STATISTICS, "▥", "Статистика")
+    )
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 8.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = CardBackground,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, BorderColor
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items.forEach { (screen, icon, label) ->
+                val selected = screen == selectedScreen
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (selected) Color(0xFF183E70)
+                            else Color.Transparent
+                        )
+                        .clickable { onSelect(screen) }
+                        .padding(vertical = 9.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = icon,
+                        fontSize = 24.sp,
+                        color = if (selected) AccentBlue
+                        else SecondaryText
+                    )
+
+                    Spacer(Modifier.height(4.dp))
+
+                    Text(
+                        text = label,
+                        fontSize = 10.sp,
+                        fontWeight = if (selected) FontWeight.Bold
+                        else FontWeight.Normal,
+                        color = if (selected) MainText
+                        else SecondaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+@Composable
+private fun RootPlaceholderScreen(
+    title: String,
+    description: String,
+    icon: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = title,
+            modifier = Modifier.fillMaxWidth(),
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold,
+            color = MainText
+        )
+
+        Spacer(Modifier.height(32.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = CardBackground
+            ),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp, BorderColor
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = icon,
+                    fontSize = 52.sp,
+                    color = AccentBlue
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "Раздел в разработке",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MainText
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                Text(
+                    text = description,
+                    fontSize = 15.sp,
+                    color = SecondaryText
+                )
+            }
         }
     }
 }

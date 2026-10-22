@@ -11,5 +11,6 @@ data class ApartmentEntity(
 
     val number: String,
     val address: String,
-    val tenant: String
+    val tenant: String,
+    val templateId: Long? = null
 )
