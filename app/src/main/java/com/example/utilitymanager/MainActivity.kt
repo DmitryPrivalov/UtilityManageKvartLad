@@ -67,8 +67,7 @@ private enum class AppScreen {
     STATISTICS,
     ADD_APARTMENT,
     DETAILS,
-    METERS,
-    CHARGES
+    METERS
 }
 
 private val meterNames = listOf(
@@ -79,6 +78,24 @@ private val meterNames = listOf(
 
 private val meterIcons = listOf("💧", "⚡", "🔥")
 private val meterUnits = listOf("м³", "кВт·ч", "м³")
+
+/** Расход за месяц показываем только для корректной пары показаний. */
+private fun monthlyConsumption(reading: MeterReading?, unit: String): String {
+    if (reading == null) return "—"
+
+    val previous = reading.previous.trim().replace(',', '.').toBigDecimalOrNull()
+        ?: return "—"
+    val current = reading.current.trim().replace(',', '.').toBigDecimalOrNull()
+        ?: return "—"
+    if (current < previous) return "—"
+
+    val consumption = current.subtract(previous)
+        .stripTrailingZeros()
+        .toPlainString()
+        .replace('.', ',')
+
+    return "$consumption $unit"
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -206,18 +223,20 @@ private fun UtilityApp() {
                         },
                         onSave = { number, address, tenant ->
                             scope.launch {
-                                val savedId = dao.insert(
-                                    ApartmentEntity(
-                                        id = if (editingId == -1L) {
-                                            0L
-                                        } else {
-                                            editingId
-                                        },
-                                        number = number,
-                                        address = address,
-                                        tenant = tenant
-                                    )
+                                // При редактировании сохраняем существующий templateId
+                                // и другие поля сущности, не меняя их значения.
+                                val existing = apartmentsFromDb.firstOrNull { it.id == editingId }
+                                val entity = existing?.copy(
+                                    number = number,
+                                    address = address,
+                                    tenant = tenant
+                                ) ?: ApartmentEntity(
+                                    id = if (editingId == -1L) 0L else editingId,
+                                    number = number,
+                                    address = address,
+                                    tenant = tenant
                                 )
+                                val savedId = dao.insert(entity)
 
                                 selectedId = savedId
                                 editingId = -1L
@@ -229,10 +248,43 @@ private fun UtilityApp() {
 
                 AppScreen.DETAILS -> {
                     if (selectedApartment == null) {
-                        screen = AppScreen.APARTMENTS
+                        // После сохранения Room может ещё не прислать обновлённый список.
+                        // Показываем индикатор, не сбрасывая навигацию на экран квартир.
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = AccentBlue)
+                        }
                     } else {
+                        val values = readings[selectedId].orEmpty()
+
+                        // Список показываем только для введённых текущих показаний.
+                        val recentReadings = meterNames.mapIndexedNotNull { index, name ->
+                            val current = values.getOrNull(index)?.current?.trim().orEmpty()
+                            if (current.isEmpty()) null else ApartmentMeterReadingUi(
+                                meterName = name,
+                                reading = "$current ${meterUnits[index]}"
+                            )
+                        }
+
+                        // Временные строки до привязки услуг и тарифов из шаблонов.
+                        // Не создаём фиктивные цены и суммы платежей.
+                        val charges = meterNames.mapIndexed { index, name ->
+                            ApartmentServiceChargeUi(
+                                serviceName = name,
+                                monthlyUsage = monthlyConsumption(
+                                    values.getOrNull(index), meterUnits[index]
+                                ),
+                                unitTariff = "—",
+                                monthlyAmount = "—"
+                            )
+                        }
+
                         ApartmentDetails(
                             apartment = selectedApartment,
+                            meterReadings = recentReadings,
+                            serviceCharges = charges,
                             onBack = {
                                 screen = AppScreen.APARTMENTS
                             },
@@ -250,9 +302,6 @@ private fun UtilityApp() {
                             },
                             onMeters = {
                                 screen = AppScreen.METERS
-                            },
-                            onCharges = {
-                                screen = AppScreen.CHARGES
                             }
                         )
                     }
@@ -265,14 +314,14 @@ private fun UtilityApp() {
                         MeterScreen(
                             apartment = selectedApartment,
                             values = readings[selectedId]
-                                ?: List(4) { MeterReading() },
+                                ?: List(meterNames.size) { MeterReading() },
                             onBack = {
                                 screen = AppScreen.DETAILS
                             },
                             onChange = { index, reading ->
                                 val current = (
                                         readings[selectedId]
-                                            ?: List(4) { MeterReading() }
+                                            ?: List(meterNames.size) { MeterReading() }
                                         ).toMutableList()
 
                                 current[index] = reading
@@ -284,16 +333,6 @@ private fun UtilityApp() {
                     }
                 }
 
-                AppScreen.CHARGES -> {
-                    PlaceholderScreen(
-                        title = "Начисления",
-                        subtitle = "Квартира № ${selectedApartment?.number.orEmpty()}",
-                        description = "Здесь появятся коммунальные услуги, тарифы и итоговая сумма.",
-                        onBack = {
-                            screen = AppScreen.DETAILS
-                        }
-                    )
-                }
             }
         }
 
@@ -480,10 +519,11 @@ private fun ApartmentCard(
 @Composable
 private fun ApartmentDetails(
     apartment: Apartment,
+    meterReadings: List<ApartmentMeterReadingUi>,
+    serviceCharges: List<ApartmentServiceChargeUi>,
     onBack: () -> Unit,
     onEdit: () -> Unit,
     onMeters: () -> Unit,
-    onCharges: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showDeleteDialog by remember {
@@ -506,7 +546,7 @@ private fun ApartmentDetails(
             )
 
             Text(
-                "Квартира № ${apartment.number}",
+                "Карточка квартиры",
                 modifier = Modifier.weight(1f),
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
@@ -528,101 +568,13 @@ private fun ApartmentDetails(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Card(
-                shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(containerColor = CardBackground),
-                border = androidx.compose.foundation.BorderStroke(1.dp, BorderColor)
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        apartment.address,
-                        fontSize = 21.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(Modifier.height(14.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Жилец", color = SecondaryText, fontSize = 14.sp)
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                apartment.tenant.ifBlank { "Не указан" },
-                                fontSize = 16.sp
-                            )
-
-
-                        }
-
-                    }
-                }
-            }
-
-            Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = FieldBackground)
-            ) {
-                Column(Modifier.padding(18.dp)) {
-                    Text("К оплате", fontSize = 16.sp, color = SecondaryText)
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        "—",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MainText
-                    )
-                    Text(
-                        "Расчёты пока не подключены",
-                        fontSize = 14.sp,
-                        color = SecondaryText
-                    )
-                }
-            }
-
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onMeters),
-                shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFF153C73)
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    AccentBlue
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 22.dp, horizontal = 16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("◉", fontSize = 32.sp, color = Color.White)
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Text(
-                        "ВВЕСТИ ПОКАЗАНИЯ СЧЁТЧИКОВ",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-
-                    Spacer(Modifier.height(5.dp))
-
-                    Text(
-                        "Вода · Электричество · Газ",
-                        fontSize = 14.sp,
-                        color = Color(0xFFD4E4FF)
-                    )
-                }
-            }
-
-            SecondaryButton("Начисления и услуги", onCharges)
+            ApartmentCardSections(
+                apartmentNumber = apartment.number,
+                resident = apartment.tenant,
+                meterReadings = meterReadings,
+                serviceCharges = serviceCharges,
+                onEnterReadings = onMeters
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SmallActionCard("История", "◷", Modifier.weight(1f)) {}
@@ -633,9 +585,10 @@ private fun ApartmentDetails(
                 color = SecondaryText,
                 fontSize = 13.sp
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(24.dp)) // отступ от нижней системной панели
         }
     }
+
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
