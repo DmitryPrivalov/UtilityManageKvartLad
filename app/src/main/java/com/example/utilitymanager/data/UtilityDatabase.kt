@@ -1,4 +1,3 @@
-
 package com.example.utilitymanager.data
 
 import android.content.Context
@@ -11,9 +10,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [
         ApartmentEntity::class,
-        TemplateEntity::class
+        TemplateEntity::class,
+        MonthlyChargeEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class UtilityDatabase : RoomDatabase() {
@@ -21,6 +21,8 @@ abstract class UtilityDatabase : RoomDatabase() {
     abstract fun apartmentDao(): ApartmentDao
 
     abstract fun templateDao(): TemplateDao
+
+    abstract fun monthlyChargeDao(): MonthlyChargeDao
 
     companion object {
         @Volatile
@@ -38,20 +40,20 @@ abstract class UtilityDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     """
-            CREATE TABLE IF NOT EXISTS calculation_templates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                name TEXT NOT NULL,
-                startDay INTEGER NOT NULL,
-                extraSettingsJson TEXT NOT NULL
-            )
-            """.trimIndent()
+                    CREATE TABLE IF NOT EXISTS calculation_templates (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        startDay INTEGER NOT NULL,
+                        extraSettingsJson TEXT NOT NULL
+                    )
+                    """.trimIndent()
                 )
 
                 db.execSQL(
                     """
-            ALTER TABLE apartments
-            ADD COLUMN templateId INTEGER
-            """.trimIndent()
+                    ALTER TABLE apartments
+                    ADD COLUMN templateId INTEGER
+                    """.trimIndent()
                 )
             }
         }
@@ -63,7 +65,11 @@ abstract class UtilityDatabase : RoomDatabase() {
                     UtilityDatabase::class.java,
                     "utility_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(
+                        MIGRATION_1_2,
+                        MIGRATION_2_3,
+                        MIGRATION_3_4_MONTHLY_CHARGES
+                    )
                     .build()
 
                 INSTANCE = instance

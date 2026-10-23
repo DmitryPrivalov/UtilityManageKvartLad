@@ -27,6 +27,16 @@ import com.example.utilitymanager.data.UtilityDatabase
 import kotlinx.coroutines.launch
 import com.example.utilitymanager.ui.TemplateScreen
 import com.example.utilitymanager.data.ApartmentEntity
+import com.example.utilitymanager.data.MonthlyChargeEntity
+import com.example.utilitymanager.data.TemplateEntity
+import com.example.utilitymanager.data.TemplateFieldsCatalog
+import com.example.utilitymanager.data.TemplateBilling
+import com.example.utilitymanager.data.ResolvedTemplateService
+import com.example.utilitymanager.data.HistoryRetentionSettings
+import java.math.BigDecimal
+import java.time.YearMonth
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import androidx.compose.ui.draw.clip
 
 private val AppBackground = Color(0xFF070E19)
@@ -52,7 +62,8 @@ data class Apartment(
     val id: Long,
     val number: String,
     val address: String,
-    val tenant: String
+    val tenant: String,
+    val templateId: Long? = null
 )
 
 data class MeterReading(
@@ -64,6 +75,7 @@ private enum class AppScreen {
     APARTMENTS,
     TEMPLATES,
     HISTORY,
+    HISTORY_DETAILS,
     STATISTICS,
     ADD_APARTMENT,
     DETAILS,
@@ -76,8 +88,110 @@ private val meterNames = listOf(
     "Газ"
 )
 
+private val meterKeys = listOf("cold_water", "electricity", "gas")
 private val meterIcons = listOf("💧", "⚡", "🔥")
 private val meterUnits = listOf("м³", "кВт·ч", "м³")
+
+private fun monthTitle(isoMonth: String): String =
+    YearMonth.parse(isoMonth).format(DateTimeFormatter.ofPattern("LLLL yyyy", Locale("ru", "RU")))
+
+private fun parseReadingValue(text: String): BigDecimal? =
+    text.trim().replace(',', '.').toBigDecimalOrNull()
+
+private fun checkReadings(values: List<MeterReading>, allowEmpty: Boolean = false): String? {
+    if (values.none { it.previous.isNotBlank() || it.current.isNotBlank() }) {
+        return if (allowEmpty) null else "Введите хотя бы одну пару показаний"
+    }
+    values.forEachIndexed { index, reading ->
+        val prevText = reading.previous.trim()
+        val currText = reading.current.trim()
+        if (prevText.isEmpty() && currText.isEmpty()) return@forEachIndexed
+        val previous = parseReadingValue(prevText)
+        val current = parseReadingValue(currText)
+        if (previous == null || current == null || previous < BigDecimal.ZERO || current < BigDecimal.ZERO) {
+            return "Услуга «${meterNames[index]}»: укажи два корректных неотрицательных числа"
+        }
+        if (current < previous) {
+            return "Услуга «${meterNames[index]}»: текущее показание меньше предыдущего"
+        }
+    }
+    return null
+}
+
+private fun decimalString(value: BigDecimal): String =
+    value.stripTrailingZeros().toPlainString()
+
+private fun persistedReadings(charges: List<MonthlyChargeEntity>, month: String): List<MeterReading> =
+    meterKeys.map { key ->
+        val charge = charges.firstOrNull { it.yearMonth == month && it.serviceKey == key }
+        MeterReading(
+            current = charge?.currentReading.orEmpty(),
+            previous = charge?.previousReading.orEmpty()
+        )
+    }
+
+/** Снимок тарифов и сумм на момент сохранения начислений за месяц. */
+private fun chargesForMonth(
+    apartmentId: Long,
+    month: String,
+    values: List<MeterReading>,
+    existing: List<MonthlyChargeEntity>,
+    services: List<ResolvedTemplateService>
+): List<MonthlyChargeEntity> {
+    val previous = existing.filter { it.yearMonth == month }.associateBy { it.serviceKey }
+    val byKey = services.associateBy { it.key }
+    val meters = meterNames.mapIndexedNotNull { index, name ->
+        val reading = values.getOrNull(index) ?: return@mapIndexedNotNull null
+        if (reading.previous.isBlank() && reading.current.isBlank()) return@mapIndexedNotNull null
+        TemplateBilling.meterRow(
+            apartmentId = apartmentId,
+            month = month,
+            key = meterKeys[index],
+            defaultName = name,
+            defaultUnit = meterUnits[index],
+            previous = parseReadingValue(reading.previous)!!,
+            current = parseReadingValue(reading.current)!!,
+            previousRow = previous[meterKeys[index]],
+            service = byKey[meterKeys[index]]
+        )
+    }
+    val fixed = services.filter { it.isFixed }.map { service ->
+        TemplateBilling.fixedRow(apartmentId, month, service, previous[service.key])
+    }
+    return meters + fixed
+}
+
+private fun chargeRowUi(row: MonthlyChargeEntity): ApartmentServiceChargeUi =
+    ApartmentServiceChargeUi(
+        monthTitle = monthTitle(row.yearMonth),
+        serviceName = row.serviceName,
+        monthlyUsage = row.usage?.let { "${it.replace('.', ',')} ${row.unit}" } ?: "—",
+        unitTariff = row.unitPrice?.let { "${it.replace('.', ',')} ₽/${row.unit}" } ?: "—",
+        monthlyAmount = row.amount?.let { "${it.replace('.', ',')} ₽" } ?: "—"
+    )
+
+/** Показываем не сохранённые ещё услуги текущего месяца из выбранного шаблона. */
+private fun previewMonth(
+    month: String,
+    saved: List<MonthlyChargeEntity>,
+    services: List<ResolvedTemplateService>
+): List<ApartmentServiceChargeUi> {
+    val existing = saved.associateBy { it.serviceKey }
+    val defined = services.map { service ->
+        val row = existing[service.key]
+        val price = row?.unitPrice?.toBigDecimalOrNull() ?: service.price
+        val usage = row?.usage?.toBigDecimalOrNull() ?: if (service.isFixed) BigDecimal.ONE else null
+        val sum = row?.amount ?: TemplateBilling.amount(usage, price)
+        ApartmentServiceChargeUi(
+            monthTitle = monthTitle(month),
+            serviceName = row?.serviceName ?: service.name,
+            monthlyUsage = usage?.let { "${TemplateBilling.normalized(it).replace('.', ',')} ${row?.unit ?: service.unit}" } ?: "—",
+            unitTariff = price?.let { "${TemplateBilling.normalized(it).replace('.', ',')} ₽/${row?.unit ?: service.unit}" } ?: "—",
+            monthlyAmount = sum?.let { "${it.replace('.', ',')} ₽" } ?: "—"
+        )
+    }
+    return defined + saved.filter { row -> services.none { it.key == row.serviceKey } }.map(::chargeRowUi)
+}
 
 /** Расход за месяц показываем только для корректной пары показаний. */
 private fun monthlyConsumption(reading: MeterReading?, unit: String): String {
@@ -129,17 +243,27 @@ private fun UtilityApp() {
     val templateDao = remember {
         UtilityDatabase.getDatabase(context).templateDao()
     }
+    val monthlyChargeDao = remember {
+        UtilityDatabase.getDatabase(context).monthlyChargeDao()
+    }
     val scope = rememberCoroutineScope()
 
     val apartmentsFromDb by dao.getAll()
         .collectAsState(initial = emptyList())
+    val templatesFromDb by templateDao.getAll()
+        .collectAsState(initial = emptyList())
+    val templateOptions = templatesFromDb.map { ApartmentTemplateOptionUi(it.id, it.name) }
+    val catalogResult = remember(context) { runCatching { TemplateFieldsCatalog.load(context) } }
+    val catalog = catalogResult.getOrNull()
+    var selectionError by remember { mutableStateOf<String?>(null) }
 
     val apartments = apartmentsFromDb.map { entity ->
         Apartment(
             id = entity.id,
             number = entity.number,
             address = entity.address,
-            tenant = entity.tenant
+            tenant = entity.tenant,
+            templateId = entity.templateId
         )
     }
 
@@ -147,11 +271,35 @@ private fun UtilityApp() {
     var selectedId by remember { mutableStateOf(-1L) }
     var editingId by remember { mutableStateOf(-1L) }
 
+    // Несохранённые изменения разделены по квартире и расчётному месяцу.
     var readings by remember {
-        mutableStateOf<Map<Long, List<MeterReading>>>(emptyMap())
+        mutableStateOf<Map<Pair<Long, String>, List<MeterReading>>>(emptyMap())
+    }
+    var selectedMonth by remember { mutableStateOf(YearMonth.now().toString()) }
+    var saveError by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    var historyBackScreen by remember { mutableStateOf(AppScreen.DETAILS) }
+    var historyError by remember { mutableStateOf<String?>(null) }
+    var retentionDisabled by remember {
+        mutableStateOf(HistoryRetentionSettings.isDisabled(context))
     }
 
+    val savedCharges by remember(selectedId) {
+        monthlyChargeDao.observeByApartment(selectedId)
+    }.collectAsState(initial = emptyList())
+
     val selectedApartment = apartments.find { it.id == selectedId }
+    val selectedTemplate = templatesFromDb.firstOrNull { it.id == selectedApartment?.templateId }
+    val servicesResult = remember(selectedTemplate, catalog) {
+        runCatching {
+            if (selectedTemplate == null || catalog == null) emptyList()
+            else TemplateBilling.activeServices(selectedTemplate, catalog)
+        }
+    }
+    val activeServices = servicesResult.getOrDefault(emptyList())
+    val templateError = selectionError
+        ?: catalogResult.exceptionOrNull()?.message?.let { "Не удалось прочитать каталог услуг: $it" }
+        ?: servicesResult.exceptionOrNull()?.message?.let { "Ошибка шаблона: $it" }
 
     val mainTab = screen in setOf(
         AppScreen.APARTMENTS,
@@ -176,12 +324,15 @@ private fun UtilityApp() {
                 AppScreen.APARTMENTS -> {
                     ApartmentList(
                         apartments = apartments,
+                        templates = templateOptions,
                         onAdd = {
                             editingId = -1L
                             screen = AppScreen.ADD_APARTMENT
                         },
                         onOpen = {
                             selectedId = it.id
+                            selectedMonth = YearMonth.now().toString()
+                            saveError = null
                             screen = AppScreen.DETAILS
                         }
                     )
@@ -194,11 +345,57 @@ private fun UtilityApp() {
 
 
                 AppScreen.HISTORY -> {
-                    RootPlaceholderScreen(
-                        title = "История",
-                        description = "История показаний и начислений появится позже.",
-                        icon = "◷"
+                    HistoryApartmentsScreen(
+                        apartments = apartments,
+                        onOpenApartment = { apartmentId ->
+                            selectedId = apartmentId
+                            historyBackScreen = AppScreen.HISTORY
+                            historyError = null
+                            screen = AppScreen.HISTORY_DETAILS
+                        }
                     )
+                }
+
+                AppScreen.HISTORY_DETAILS -> {
+                    val apartment = selectedApartment
+                    if (apartment == null) {
+                        // Квартира могла быть удалена из другого экрана.
+                        screen = AppScreen.HISTORY
+                    } else {
+                        MonthlyHistoryScreen(
+                            apartmentNumber = apartment.number,
+                            savedCharges = savedCharges,
+                            currentMonthPreview = if (selectedTemplate != null && servicesResult.isSuccess) {
+                                val month = YearMonth.now().toString()
+                                previewMonth(
+                                    month = month,
+                                    saved = savedCharges.filter { it.yearMonth == month },
+                                    services = activeServices
+                                )
+                            } else emptyList(),
+                            retentionDisabled = retentionDisabled,
+                            errorMessage = historyError,
+                            onBack = { screen = historyBackScreen },
+                            onRetentionChanged = { disabled ->
+                                HistoryRetentionSettings.setDisabled(context, disabled)
+                                retentionDisabled = disabled
+                                historyError = null
+                            },
+                            onDeleteExpired = { cutoff ->
+                                // Удаление возможно только после нажатия «Удалить» в диалоге.
+                                if (!retentionDisabled) {
+                                    scope.launch {
+                                        try {
+                                            monthlyChargeDao.deleteBeforeMonth(apartment.id, cutoff)
+                                            historyError = null
+                                        } catch (e: Exception) {
+                                            historyError = "Ошибка очистки: ${e.localizedMessage ?: "попробуй ещё раз"}"
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
                 }
 
                 AppScreen.STATISTICS -> {
@@ -257,34 +454,72 @@ private fun UtilityApp() {
                             CircularProgressIndicator(color = AccentBlue)
                         }
                     } else {
-                        val values = readings[selectedId].orEmpty()
-
-                        // Список показываем только для введённых текущих показаний.
+                        // Последний сохранённый месяц для краткого списка показаний.
+                        val latestMonth = savedCharges
+                            .filter { !it.currentReading.isNullOrBlank() }
+                            .maxOfOrNull { it.yearMonth }
+                        val values = if (latestMonth == null) emptyList()
+                            else persistedReadings(savedCharges, latestMonth)
                         val recentReadings = meterNames.mapIndexedNotNull { index, name ->
-                            val current = values.getOrNull(index)?.current?.trim().orEmpty()
-                            if (current.isEmpty()) null else ApartmentMeterReadingUi(
+                            val current = values.getOrNull(index)?.current.orEmpty()
+                            if (current.isBlank()) null else ApartmentMeterReadingUi(
                                 meterName = name,
-                                reading = "$current ${meterUnits[index]}"
+                                reading = "$current ${meterUnits[index]}",
+                                period = latestMonth?.let(::monthTitle).orEmpty()
                             )
                         }
 
-                        // Временные строки до привязки услуг и тарифов из шаблонов.
-                        // Не создаём фиктивные цены и суммы платежей.
-                        val charges = meterNames.mapIndexed { index, name ->
-                            ApartmentServiceChargeUi(
-                                serviceName = name,
-                                monthlyUsage = monthlyConsumption(
-                                    values.getOrNull(index), meterUnits[index]
-                                ),
-                                unitTariff = "—",
-                                monthlyAmount = "—"
-                            )
+                        // Сохранённые месяцы — исторические снимки. Для текущего месяца
+                        // показываем все услуги шаблона даже до ввода показаний.
+                        val currentMonth = YearMonth.now().toString()
+                        val savedMonths = savedCharges.groupBy { it.yearMonth }
+                        // В карточке всегда только текущий и два предыдущих месяца.
+                        // Остальные месяцы остаются в Room и открываются через Историю.
+                        val visibleMonths = (0..2).map {
+                            YearMonth.now().minusMonths(it.toLong()).toString()
+                        }
+                        val charges = visibleMonths.flatMap { month ->
+                            val rows = savedMonths[month].orEmpty()
+                            if (month == currentMonth && selectedTemplate != null && servicesResult.isSuccess) {
+                                previewMonth(month, rows, activeServices)
+                            } else {
+                                rows.sortedWith(compareBy { row ->
+                                    catalog?.services?.indexOfFirst { it.key == row.serviceKey }
+                                        ?.takeIf { it >= 0 } ?: Int.MAX_VALUE
+                                }).map(::chargeRowUi)
+                            }
                         }
 
                         ApartmentDetails(
                             apartment = selectedApartment,
                             meterReadings = recentReadings,
                             serviceCharges = charges,
+                            visibleMonthTitles = visibleMonths.map(::monthTitle),
+                            templates = templateOptions,
+                            templateError = templateError,
+                            onTemplateSelected = { newId ->
+                                if (newId != selectedApartment.templateId) {
+                                    selectionError = null
+                                    scope.launch {
+                                        try {
+                                            val currentEntity = apartmentsFromDb.firstOrNull {
+                                                it.id == selectedApartment.id
+                                            } ?: error("Квартира не найдена")
+                                            val template = templatesFromDb.firstOrNull { it.id == newId }
+                                            val mapped = if (template != null && catalog != null) {
+                                                TemplateBilling.activeServices(template, catalog)
+                                            } else emptyList()
+                                            dao.insert(currentEntity.copy(templateId = newId))
+                                            if (mapped.isNotEmpty()) {
+                                                val corrections = TemplateBilling.fillMissingPrices(savedCharges, mapped)
+                                                if (corrections.isNotEmpty()) monthlyChargeDao.insertAll(corrections)
+                                            }
+                                        } catch (e: Exception) {
+                                            selectionError = "Не удалось выбрать шаблон: ${e.localizedMessage ?: "ошибка"}"
+                                        }
+                                    }
+                                }
+                            },
                             onBack = {
                                 screen = AppScreen.APARTMENTS
                             },
@@ -294,14 +529,21 @@ private fun UtilityApp() {
                             },
                             onDelete = {
                                 scope.launch {
-                                    dao.deleteById(selectedId)
-                                    readings = readings - selectedId
+                                    val apartmentId = selectedId
+                                    monthlyChargeDao.deleteByApartment(apartmentId)
+                                    dao.deleteById(apartmentId)
+                                    readings = readings.filterKeys { it.first != apartmentId }
                                     selectedId = -1L
                                     screen = AppScreen.APARTMENTS
                                 }
                             },
                             onMeters = {
                                 screen = AppScreen.METERS
+                            },
+                            onHistory = {
+                                historyBackScreen = AppScreen.DETAILS
+                                historyError = null
+                                screen = AppScreen.HISTORY_DETAILS
                             }
                         )
                     }
@@ -311,23 +553,59 @@ private fun UtilityApp() {
                     if (selectedApartment == null) {
                         screen = AppScreen.APARTMENTS
                     } else {
+                        val apartmentId = selectedId
+                        val draftKey = apartmentId to selectedMonth
+                        val values = readings[draftKey]
+                            ?: persistedReadings(savedCharges, selectedMonth)
                         MeterScreen(
                             apartment = selectedApartment,
-                            values = readings[selectedId]
-                                ?: List(meterNames.size) { MeterReading() },
+                            selectedMonth = selectedMonth,
+                            values = values,
+                            saveError = saveError,
+                            saving = saving,
+                            onMonthChange = { delta ->
+                                selectedMonth = YearMonth.parse(selectedMonth).plusMonths(delta.toLong()).toString()
+                                saveError = null
+                            },
                             onBack = {
+                                saveError = null
                                 screen = AppScreen.DETAILS
                             },
                             onChange = { index, reading ->
-                                val current = (
-                                        readings[selectedId]
-                                            ?: List(meterNames.size) { MeterReading() }
-                                        ).toMutableList()
-
+                                val current = values.toMutableList()
                                 current[index] = reading
-                                readings = readings + (
-                                        selectedId to current
-                                        )
+                                readings = readings + (draftKey to current)
+                                saveError = null
+                            },
+                            onSave = {
+                                val message = checkReadings(values, allowEmpty = activeServices.any { it.isFixed })
+                                if (message != null) {
+                                    saveError = message
+                                } else if (!saving) {
+                                    saving = true
+                                    val savingMonth = selectedMonth
+                                    val savingValues = values.toList()
+                                    scope.launch {
+                                        try {
+                                            val rows = chargesForMonth(
+                                                apartmentId, savingMonth, savingValues, savedCharges, activeServices
+                                            )
+                                            val managed = meterKeys +
+                                                (catalog?.services?.filter { it.billingType == "fixed" }
+                                                    ?.map { it.key } ?: emptyList())
+                                            monthlyChargeDao.replaceCalculatedMonth(
+                                                apartmentId, savingMonth, managed.distinct(), rows
+                                            )
+                                            readings = readings - (apartmentId to savingMonth)
+                                            saveError = null
+                                            screen = AppScreen.DETAILS
+                                        } catch (e: Exception) {
+                                            saveError = "Не удалось сохранить начисления: ${e.localizedMessage ?: "ошибка базы данных"}"
+                                        } finally {
+                                            saving = false
+                                        }
+                                    }
+                                }
                             }
                         )
                     }
@@ -348,6 +626,7 @@ private fun UtilityApp() {
 @Composable
 private fun ApartmentList(
     apartments: List<Apartment>,
+    templates: List<ApartmentTemplateOptionUi>,
     onAdd: () -> Unit,
     onOpen: (Apartment) -> Unit
 ) {
@@ -417,7 +696,11 @@ private fun ApartmentList(
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
                 items(apartments, key = { it.id }) { apartment ->
-                    ApartmentCard(apartment, onClick = { onOpen(apartment) })
+                    ApartmentCard(
+                        apartment = apartment,
+                        templateName = templates.firstOrNull { it.id == apartment.templateId }?.name,
+                        onClick = { onOpen(apartment) }
+                    )
                 }
             }
         }
@@ -433,6 +716,7 @@ private fun ApartmentList(
 @Composable
 private fun ApartmentCard(
     apartment: Apartment,
+    templateName: String?,
     onClick: () -> Unit
 ) {
     Card(
@@ -485,6 +769,12 @@ private fun ApartmentCard(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
+                    "Шаблон: " + (templateName ?: if (apartment.templateId == null) "Не выбран" else "Не найден"),
+                    fontSize = 13.sp,
+                    color = if (templateName == null) SecondaryText else AccentBlue
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
                     apartment.tenant.ifBlank { "Жилец не указан" },
                     fontSize = 15.sp,
                     color = MainText
@@ -521,9 +811,14 @@ private fun ApartmentDetails(
     apartment: Apartment,
     meterReadings: List<ApartmentMeterReadingUi>,
     serviceCharges: List<ApartmentServiceChargeUi>,
+    visibleMonthTitles: List<String>,
+    templates: List<ApartmentTemplateOptionUi>,
+    templateError: String?,
+    onTemplateSelected: (Long?) -> Unit,
     onBack: () -> Unit,
     onEdit: () -> Unit,
     onMeters: () -> Unit,
+    onHistory: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showDeleteDialog by remember {
@@ -573,15 +868,20 @@ private fun ApartmentDetails(
                 resident = apartment.tenant,
                 meterReadings = meterReadings,
                 serviceCharges = serviceCharges,
+                visibleMonthTitles = visibleMonthTitles,
+                templates = templates,
+                selectedTemplateId = apartment.templateId,
+                templateError = templateError,
+                onTemplateSelected = onTemplateSelected,
                 onEnterReadings = onMeters
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                SmallActionCard("История", "◷", Modifier.weight(1f)) {}
+                SmallActionCard("История", "◷", Modifier.weight(1f), onClick = onHistory)
                 SmallActionCard("PDF-отчёт", "▤", Modifier.weight(1f)) {}
             }
             Text(
-                "История и PDF пока не реализованы",
+                "PDF-отчёт пока не реализован",
                 color = SecondaryText,
                 fontSize = 13.sp
             )
@@ -628,9 +928,14 @@ private fun ApartmentDetails(
 @Composable
 private fun MeterScreen(
     apartment: Apartment,
+    selectedMonth: String,
     values: List<MeterReading>,
+    saveError: String?,
+    saving: Boolean,
+    onMonthChange: (Int) -> Unit,
     onBack: () -> Unit,
-    onChange: (Int, MeterReading) -> Unit
+    onChange: (Int, MeterReading) -> Unit,
+    onSave: () -> Unit
 ) {
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Показания счётчиков", onBack)
@@ -640,7 +945,31 @@ private fun MeterScreen(
             color = SecondaryText,
             fontSize = 16.sp
         )
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            TextButton(onClick = { onMonthChange(-1) }, enabled = !saving) {
+                Text("‹", fontSize = 28.sp)
+            }
+            Text(
+                monthTitle(selectedMonth).replaceFirstChar { it.uppercaseChar() },
+                color = MainText,
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp
+            )
+            TextButton(onClick = { onMonthChange(1) }, enabled = !saving) {
+                Text("›", fontSize = 28.sp)
+            }
+        }
+        Text(
+            "Выбери расчётный месяц и введи показания за него",
+            color = SecondaryText,
+            fontSize = 12.sp
+        )
+        Spacer(Modifier.height(12.dp))
 
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -714,7 +1043,7 @@ private fun MeterScreen(
 
                         Spacer(Modifier.height(10.dp))
                         Text(
-                            "Расчёт расхода пока отключён",
+                            "Расход за месяц: ${monthlyConsumption(values[index], meterUnits[index])}",
                             color = SecondaryText,
                             fontSize = 13.sp
                         )
@@ -723,11 +1052,22 @@ private fun MeterScreen(
             }
         }
 
-        Text(
-            "Показания хранятся временно до подключения базы данных.",
-            color = SecondaryText,
-            fontSize = 13.sp
-        )
+        if (saveError != null) {
+            Text(
+                saveError,
+                color = Color(0xFFFF8888),
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        Button(
+            onClick = onSave,
+            enabled = !saving,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text(if (saving) "Сохранение…" else "Сохранить за ${monthTitle(selectedMonth)}")
+        }
         Spacer(Modifier.height(12.dp))
     }
 }

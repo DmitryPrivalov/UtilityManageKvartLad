@@ -2,6 +2,7 @@ package com.example.utilitymanager
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,9 +16,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -28,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /** Элемент списка показаний; получаем его из состояния MainActivity. */
+data class ApartmentTemplateOptionUi(val id: Long, val name: String)
+
 data class ApartmentMeterReadingUi(
     val meterName: String,
     val reading: String,
@@ -39,11 +49,11 @@ data class ApartmentMeterReadingUi(
  * monthTitle нужен для группировки в отдельные контейнеры: "Октябрь 2026", "Ноябрь 2026" и т.д.
  */
 data class ApartmentServiceChargeUi(
-    val monthTitle: String = "Текущий месяц",
     val serviceName: String,
     val monthlyUsage: String,
     val unitTariff: String,
-    val monthlyAmount: String
+    val monthlyAmount: String,
+    val monthTitle: String = "Текущий месяц"
 )
 
 private val CardSurface = Color(0xFF122034)
@@ -68,6 +78,11 @@ fun ApartmentCardSections(
     resident: String?,
     meterReadings: List<ApartmentMeterReadingUi>,
     serviceCharges: List<ApartmentServiceChargeUi>,
+    visibleMonthTitles: List<String>,
+    templates: List<ApartmentTemplateOptionUi>,
+    selectedTemplateId: Long?,
+    templateError: String?,
+    onTemplateSelected: (Long?) -> Unit,
     onEnterReadings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -75,43 +90,96 @@ fun ApartmentCardSections(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Компактная информация — без адреса.
+        // 1. Номер/жилец и прикреплённый к квартире шаблон.
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
             color = CardSurface,
             border = BorderStroke(1.dp, CardBorder)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.width(115.dp)) {
-                    Text("Квартира №", color = TextSecondary, fontSize = 12.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        apartmentNumber.ifBlank { "—" },
-                        color = TextPrimary,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.width(115.dp)) {
+                        Text("Квартира №", color = TextSecondary, fontSize = 12.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            apartmentNumber.ifBlank { "—" },
+                            color = TextPrimary,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Box(Modifier.width(1.dp).height(40.dp).background(CardBorder))
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("Жилец", color = TextSecondary, fontSize = 12.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            resident?.takeIf { it.isNotBlank() } ?: "Не указан",
+                            color = TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
-                Spacer(Modifier.width(10.dp))
-                Box(Modifier.width(1.dp).height(40.dp).background(CardBorder))
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text("Жилец", color = TextSecondary, fontSize = 12.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        resident?.takeIf { it.isNotBlank() } ?: "Не указан",
-                        color = TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+
+                Spacer(Modifier.height(12.dp))
+                ThinDivider()
+                Spacer(Modifier.height(12.dp))
+                Text("Шаблон", color = TextSecondary, fontSize = 13.sp)
+                Spacer(Modifier.height(6.dp))
+                var expanded by remember { mutableStateOf(false) }
+                val chosen = templates.firstOrNull { it.id == selectedTemplateId }
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { expanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, CardBorder)
+                    ) {
+                        Text(
+                            text = when {
+                                chosen != null -> chosen.name
+                                selectedTemplateId != null -> "Шаблон удалён — выбери другой"
+                                else -> "Выбрать шаблон"
+                            },
+                            modifier = Modifier.weight(1f),
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text("▾", color = TextPrimary)
+                    }
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Без шаблона") },
+                            onClick = {
+                                expanded = false
+                                onTemplateSelected(null)
+                            }
+                        )
+                        templates.forEach { template ->
+                            DropdownMenuItem(
+                                text = { Text(template.name) },
+                                onClick = {
+                                    expanded = false
+                                    onTemplateSelected(template.id)
+                                }
+                            )
+                        }
+                    }
+                }
+                if (templateError != null) {
+                    Spacer(Modifier.height(7.dp))
+                    Text(templateError, color = Color(0xFFFF8D8D), fontSize = 12.sp)
                 }
             }
         }
@@ -193,76 +261,109 @@ fun ApartmentCardSections(
                 )
                 Spacer(Modifier.height(14.dp))
 
-                if (serviceCharges.isEmpty()) {
-                    Text(
-                        "Услуги появятся после настройки шаблона расчёта.",
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                        color = TextSecondary,
-                        fontSize = 14.sp
+                val grouped = serviceCharges.groupBy { it.monthTitle }
+                visibleMonthTitles.forEachIndexed { index, title ->
+                    MonthlyChargesBlock(
+                        monthTitle = title,
+                        charges = grouped[title].orEmpty(),
+                        initiallyExpanded = index == 0
                     )
-                } else {
-                    serviceCharges
-                        .groupBy { it.monthTitle }
-                        .forEach { (monthTitle, monthCharges) ->
-                            MonthlyChargesBlock(
-                                monthTitle = monthTitle,
-                                charges = monthCharges
-                            )
-                            Spacer(Modifier.height(12.dp))
-                        }
+                    if (index != visibleMonthTitles.lastIndex) {
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * Переиспользуемая карточка месяца для квартиры и истории.
+ * В свернутом виде остаётся только название месяца и стрелка.
+ */
 @Composable
-private fun MonthlyChargesBlock(
+fun MonthlyChargesBlock(
     monthTitle: String,
-    charges: List<ApartmentServiceChargeUi>
+    charges: List<ApartmentServiceChargeUi>,
+    initiallyExpanded: Boolean = false
 ) {
+    var expanded by remember(monthTitle) { mutableStateOf(initiallyExpanded) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = ServiceItemBackground,
         shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, GridLine)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp)
-        ) {
-            Box(
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MonthBackground, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "За $monthTitle",
+                    text = monthTitle.replaceFirstChar { it.uppercaseChar() },
+                    modifier = Modifier.fillMaxWidth(0.88f),
                     color = MonthTitleColor,
-                    fontSize = 16.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold
                 )
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            charges.forEachIndexed { index, charge ->
-                if (index > 0) {
-                    Spacer(Modifier.height(10.dp))
-                }
-                ServiceChargeRow(charge)
-            }
-
-            if (charges.all { it.unitTariff == "—" && it.monthlyAmount == "—" }) {
-                Spacer(Modifier.height(12.dp))
                 Text(
-                    "Тарифы и суммы появятся после настройки шаблона.",
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                    color = TextSecondary,
-                    fontSize = 12.sp
+                    text = if (expanded) "⌃" else "⌄",
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MonthTitleColor,
+                    fontSize = 22.sp,
+                    textAlign = TextAlign.End
                 )
+            }
+
+            if (expanded) {
+                Spacer(Modifier.height(12.dp))
+                if (charges.isEmpty()) {
+                    Text(
+                        "Начислений за этот месяц пока нет",
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+                        color = TextSecondary,
+                        fontSize = 14.sp
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Услуга",
+                            modifier = Modifier.fillMaxWidth(0.55f),
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            "Сумма за месяц",
+                            modifier = Modifier.fillMaxWidth(),
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.End
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    charges.forEachIndexed { index, charge ->
+                        if (index > 0) Spacer(Modifier.height(10.dp))
+                        ServiceChargeRow(charge)
+                    }
+                    if (charges.all { it.unitTariff == "—" && it.monthlyAmount == "—" }) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "Тарифы и суммы появятся после настройки шаблона.",
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
             }
         }
     }

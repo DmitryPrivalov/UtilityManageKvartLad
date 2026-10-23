@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "id": "management_company",
+      "label": "Управляющая компания",
+      "type": "text",
+      "section": "Общие параметры",
+      "default": "",
+      "required": false
+    },
+    {
+      "id": "cold_water_tariff",
+      "label": "Тариф холодной воды",
+      "type": "decimal",
+      "section": "Тарифы за единицу",
+      "unit": "₽/м³",
+      "default": "",
+      "required": false
+    },
+    {
+      "id": "electricity_tariff",
+      "label": "Тариф электроэнергии",
+      "type": "decimal",
+      "section": "Тарифы за единицу",
+      "unit": "₽/кВт·ч",
+      "default": "",
+      "required": false
+    },
+    {
+      "id": "gas_tariff",
+      "label": "Тариф газа",
+      "type": "decimal",
+      "section": "Тарифы за единицу",
+      "unit": "₽/м³",
+      "default": "",
+      "required": false
+    },
+    {
+      "id": "include_elevator",
+      "label": "Учитывать оплату лифта",
+      "type": "boolean",
+      "section": "Дополнительные услуги",
+      "default": "false",
+      "required": false
+    },
+    {
+      "id": "elevator_monthly_fee",
+      "label": "Лифт — оплата за месяц",
+      "type": "decimal",
+      "section": "Дополнительные услуги",
+      "unit": "₽/мес.",
+      "default": "",
+      "required": false
+    }
+  ],
+  "services": [
+    {
+      "key": "cold_water",
+      "name": "Холодная вода",
+      "unit": "м³",
+      "tariffField": "cold_water_tariff"
+    },
+    {
+      "key": "electricity",
+      "name": "Электроэнергия",
+      "unit": "кВт·ч",
+      "tariffField": "electricity_tariff"
+    },
+    {
+      "key": "gas",
+      "name": "Газ",
+      "unit": "м³",
+      "tariffField": "gas_tariff"
+    },
+    {
+      "key": "elevator",
+      "name": "Лифт",
+      "unit": "мес.",
+      "tariffField": "elevator_monthly_fee"
+    }
+  ]
+}
