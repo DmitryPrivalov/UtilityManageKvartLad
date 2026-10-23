@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.collectAsState
 import com.example.utilitymanager.data.UtilityDatabase
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import com.example.utilitymanager.ui.TemplateScreen
 import com.example.utilitymanager.data.ApartmentEntity
 import com.example.utilitymanager.data.MonthlyChargeEntity
@@ -98,21 +99,111 @@ private fun monthTitle(isoMonth: String): String =
 private fun parseReadingValue(text: String): BigDecimal? =
     text.trim().replace(',', '.').toBigDecimalOrNull()
 
-private fun checkReadings(values: List<MeterReading>, allowEmpty: Boolean = false): String? {
-    if (values.none { it.previous.isNotBlank() || it.current.isNotBlank() }) {
-        return if (allowEmpty) null else "Введите хотя бы одну пару показаний"
+/** Десятичные показания сравниваем как числа: 12,0 == 12.00. */
+private fun sameReading(first: String, second: String): Boolean {
+    val a = parseReadingValue(first) ?: return false
+    val b = parseReadingValue(second) ?: return false
+    return a.compareTo(b) == 0
+}
+
+/**
+ * Для каждого счётчика находим ТЕКУЩЕЕ показание предыдущего месяца.
+ * Нет записи за строго предыдущий месяц — нет автоматического значения.
+ */
+private fun previousMonthCurrents(
+    charges: List<MonthlyChargeEntity>,
+    month: String
+): List<String?> {
+    val previousMonth = YearMonth.parse(month).minusMonths(1).toString()
+    val priorRows = charges.filter { it.yearMonth == previousMonth }.associateBy { it.serviceKey }
+    return meterKeys.map { key ->
+        priorRows[key]?.currentReading?.takeIf { it.isNotBlank() }
     }
-    values.forEachIndexed { index, reading ->
+}
+
+/**
+ * Заполняем только ПУСТЫЕ предыдущие показания.
+ * Сохранённые значения и несохранённый ввод не затираем — возможное
+ * расхождение покажем пользователю при проверке.
+ */
+private fun fillPreviousReadings(
+    values: List<MeterReading>,
+    expected: List<String?>
+): List<MeterReading> = meterKeys.indices.map { index ->
+    val reading = values.getOrNull(index) ?: MeterReading()
+    val automatic = expected.getOrNull(index)
+    if (reading.previous.isBlank() && !automatic.isNullOrBlank()) {
+        reading.copy(previous = automatic)
+    } else {
+        reading
+    }
+}
+
+/** Проверяем пару показаний и непрерывность с предыдущим месяцем. */
+private fun checkReadings(
+    values: List<MeterReading>,
+    previousMonthValues: List<String?>,
+    allowEmpty: Boolean = false
+): String? {
+    var hasCurrent = false
+    for (index in meterKeys.indices) {
+        val reading = values.getOrNull(index) ?: MeterReading()
         val prevText = reading.previous.trim()
         val currText = reading.current.trim()
-        if (prevText.isEmpty() && currText.isEmpty()) return@forEachIndexed
+        val expected = previousMonthValues.getOrNull(index)
+
+        // Автоподставленное значение без нового показания — это ещё не начисление.
+        if (currText.isBlank()) {
+            if (prevText.isBlank()) continue
+            if (!expected.isNullOrBlank() && sameReading(prevText, expected)) continue
+            return "Услуга «${meterNames[index]}»: введи текущее показание или очисти пару"
+        }
+
+        hasCurrent = true
         val previous = parseReadingValue(prevText)
         val current = parseReadingValue(currText)
-        if (previous == null || current == null || previous < BigDecimal.ZERO || current < BigDecimal.ZERO) {
+        if (previous == null || current == null ||
+            previous < BigDecimal.ZERO || current < BigDecimal.ZERO
+        ) {
             return "Услуга «${meterNames[index]}»: укажи два корректных неотрицательных числа"
         }
         if (current < previous) {
             return "Услуга «${meterNames[index]}»: текущее показание меньше предыдущего"
+        }
+        if (!expected.isNullOrBlank() && !sameReading(prevText, expected)) {
+            return "Услуга «${meterNames[index]}»: предыдущее показание должно быть " +
+                "${expected.replace('.', ',')} — это текущее показание прошлого месяца"
+        }
+    }
+    if (!hasCurrent && !allowEmpty) return "Введите хотя бы одно текущее показание"
+    return null
+}
+
+/**
+ * Если следующий месяц уже сохранён, запрещаем ломать его начальное показание.
+ * Это предотвращает тихую порчу расчётов при редактировании истории.
+ */
+private fun checkNextMonthConsistency(
+    values: List<MeterReading>,
+    charges: List<MonthlyChargeEntity>,
+    month: String
+): String? {
+    val nextMonth = YearMonth.parse(month).plusMonths(1).toString()
+    val following = charges.filter { it.yearMonth == nextMonth }.associateBy { it.serviceKey }
+    val existingThisMonth = charges.filter { it.yearMonth == month }.associateBy { it.serviceKey }
+    for (index in meterKeys.indices) {
+        val current = values.getOrNull(index)?.current?.trim().orEmpty()
+        // Счётчик не вводили ни раньше, ни сейчас — его не проверяем.
+        // Иначе сохранение газа блокировалось бы из-за отсутствующих данных по воде.
+        val hadReading = !existingThisMonth[meterKeys[index]]?.currentReading.isNullOrBlank()
+        if (current.isBlank() && !hadReading) continue
+        val nextPrevious = following[meterKeys[index]]?.previousReading
+        if (!nextPrevious.isNullOrBlank() &&
+            (current.isBlank() || !sameReading(current, nextPrevious))
+        ) {
+            return "Услуга «${meterNames[index]}»: сохранённое предыдущее показание " +
+                "за ${monthTitle(nextMonth)} равно ${nextPrevious.replace('.', ',')}. " +
+                "Текущее показание за ${monthTitle(month)} должно совпадать с ним."
         }
     }
     return null
@@ -142,7 +233,8 @@ private fun chargesForMonth(
     val byKey = services.associateBy { it.key }
     val meters = meterNames.mapIndexedNotNull { index, name ->
         val reading = values.getOrNull(index) ?: return@mapIndexedNotNull null
-        if (reading.previous.isBlank() && reading.current.isBlank()) return@mapIndexedNotNull null
+        // Одна автозаполненная предыдущая цифра без текущей не создаёт запись.
+        if (reading.current.isBlank()) return@mapIndexedNotNull null
         TemplateBilling.meterRow(
             apartmentId = apartmentId,
             month = month,
@@ -555,12 +647,15 @@ private fun UtilityApp() {
                     } else {
                         val apartmentId = selectedId
                         val draftKey = apartmentId to selectedMonth
-                        val values = readings[draftKey]
+                        val previousValues = previousMonthCurrents(savedCharges, selectedMonth)
+                        val baseValues = readings[draftKey]
                             ?: persistedReadings(savedCharges, selectedMonth)
+                        val values = fillPreviousReadings(baseValues, previousValues)
                         MeterScreen(
                             apartment = selectedApartment,
                             selectedMonth = selectedMonth,
                             values = values,
+                            previousMonthValues = previousValues,
                             saveError = saveError,
                             saving = saving,
                             onMonthChange = { delta ->
@@ -578,27 +673,47 @@ private fun UtilityApp() {
                                 saveError = null
                             },
                             onSave = {
-                                val message = checkReadings(values, allowEmpty = activeServices.any { it.isFixed })
-                                if (message != null) {
-                                    saveError = message
-                                } else if (!saving) {
+                                if (!saving) {
                                     saving = true
                                     val savingMonth = selectedMonth
                                     val savingValues = values.toList()
                                     scope.launch {
                                         try {
-                                            val rows = chargesForMonth(
-                                                apartmentId, savingMonth, savingValues, savedCharges, activeServices
+                                            // Берём актуальные записи непосредственно из Room,
+                                            // чтобы проверки не зависели от задержки обновления Flow.
+                                            val currentCharges = monthlyChargeDao
+                                                .observeByApartment(apartmentId).first()
+                                            val requiredPrevious = previousMonthCurrents(
+                                                currentCharges, savingMonth
                                             )
-                                            val managed = meterKeys +
-                                                (catalog?.services?.filter { it.billingType == "fixed" }
-                                                    ?.map { it.key } ?: emptyList())
-                                            monthlyChargeDao.replaceCalculatedMonth(
-                                                apartmentId, savingMonth, managed.distinct(), rows
+                                            val preparedValues = fillPreviousReadings(
+                                                savingValues, requiredPrevious
                                             )
-                                            readings = readings - (apartmentId to savingMonth)
-                                            saveError = null
-                                            screen = AppScreen.DETAILS
+                                            val message = checkReadings(
+                                                values = preparedValues,
+                                                previousMonthValues = requiredPrevious,
+                                                allowEmpty = activeServices.any { it.isFixed }
+                                            ) ?: checkNextMonthConsistency(
+                                                preparedValues, currentCharges, savingMonth
+                                            )
+
+                                            if (message != null) {
+                                                saveError = message
+                                            } else {
+                                                val rows = chargesForMonth(
+                                                    apartmentId, savingMonth, preparedValues,
+                                                    currentCharges, activeServices
+                                                )
+                                                val managed = meterKeys +
+                                                    (catalog?.services?.filter { it.billingType == "fixed" }
+                                                        ?.map { it.key } ?: emptyList())
+                                                monthlyChargeDao.replaceCalculatedMonth(
+                                                    apartmentId, savingMonth, managed.distinct(), rows
+                                                )
+                                                readings = readings - (apartmentId to savingMonth)
+                                                saveError = null
+                                                screen = AppScreen.DETAILS
+                                            }
                                         } catch (e: Exception) {
                                             saveError = "Не удалось сохранить начисления: ${e.localizedMessage ?: "ошибка базы данных"}"
                                         } finally {
@@ -930,6 +1045,7 @@ private fun MeterScreen(
     apartment: Apartment,
     selectedMonth: String,
     values: List<MeterReading>,
+    previousMonthValues: List<String?>,
     saveError: String?,
     saving: Boolean,
     onMonthChange: (Int) -> Unit,
@@ -1029,6 +1145,22 @@ private fun MeterScreen(
                                 onChange(index, values[index].copy(previous = it))
                             }
                         )
+
+                        val fromLastMonth = previousMonthValues.getOrNull(index)
+                        if (!fromLastMonth.isNullOrBlank()) {
+                            Spacer(Modifier.height(6.dp))
+                            val agrees = sameReading(values[index].previous, fromLastMonth)
+                            Text(
+                                text = if (agrees) {
+                                    "Из прошлого месяца: ${fromLastMonth.replace('.', ',')} ${meterUnits[index]}"
+                                } else {
+                                    "Не совпадает с прошлым месяцем: " +
+                                        "${fromLastMonth.replace('.', ',')} ${meterUnits[index]}"
+                                },
+                                color = if (agrees) Green else Color(0xFFFF8888),
+                                fontSize = 12.sp
+                            )
+                        }
 
                         Spacer(Modifier.height(10.dp))
 
